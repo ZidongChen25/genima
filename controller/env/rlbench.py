@@ -335,7 +335,7 @@ class GenimaRLBenchFactory(RLBenchEnvFactory):
                     self._action_stats["std"],
                 )
 
-    def load_demos_into_replay(self, cfg: DictConfig, buffer):
+    def load_demos_into_replay(self, cfg: DictConfig, buffer, **kwargs):
         """See base class for documentation."""
         assert hasattr(self, "_demos"), (
             "There's no _demo attribute inside the factory, "

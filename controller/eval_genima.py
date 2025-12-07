@@ -89,7 +89,9 @@ class GenimaEvalWorkspace(Workspace):
         )
 
     def load_controller_ckpt(self, checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=self.eval_cfg.device)
+        checkpoint = torch.load(
+            checkpoint_path, map_location=self.eval_cfg.device, weights_only=False
+        )
 
         missing_keys = [
             k
@@ -187,6 +189,7 @@ class GenimaEvalWorkspace(Workspace):
 
                     # [Debug] Save input images, if enabled
                     if self.eval_cfg.save_input_image:
+                        os.makedirs(self.eval_cfg.save_image_path, exist_ok=True)
                         for tidx, timg in enumerate(tiled_images):
                             timg.save(
                                 os.path.join(
@@ -212,6 +215,7 @@ class GenimaEvalWorkspace(Workspace):
 
                         # [Debug] Save target images, if enabled
                         if self.eval_cfg.save_gen_image:
+                            os.makedirs(self.eval_cfg.save_image_path, exist_ok=True)
                             for tidx, timg in enumerate(target_images[0]):
                                 timg.save(
                                     os.path.join(
@@ -387,6 +391,7 @@ class GenimaEvalWorkspace(Workspace):
 
 @hydra.main(config_path="cfgs", config_name="eval_genima", version_base=None)
 def main(eval_cfg):
+    torch.serialization.add_safe_globals([DictConfig])
     train_cfg_path = Path(eval_cfg.train_cfg_path)
     train_cfg = OmegaConf.load(train_cfg_path)
 

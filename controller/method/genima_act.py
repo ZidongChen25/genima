@@ -365,6 +365,8 @@ class GenimaACT(ActBCAgent):
         batch = next(replay_iter)
         batch = {k: torch.tensor(v).to(self.device) for k, v in batch.items()}
         actions = batch["action"]
+        if actions.ndim == 4:
+            actions = actions.squeeze(1)
         reward = batch["reward"]
 
         if self.low_dim_size > 0:
@@ -390,7 +392,12 @@ class GenimaACT(ActBCAgent):
             )
             task_emb, _ = self.encode_clip_text(lang_tokens)
 
-        is_pad = torch.zeros_like(actions)[:, :, 0].bool()
+        if "mask_seq" in batch:
+            is_pad = ~batch["mask_seq"].bool()
+        else:
+            # Fallback (should not happen if mask is correctly stored)
+            is_pad = torch.zeros_like(actions)[:, :, 0].bool()
+        
         loss_dict = self.actor(
             qpos, image, actions=actions, is_pad=is_pad, task_emb=task_emb
         )

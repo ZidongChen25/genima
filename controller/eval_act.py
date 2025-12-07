@@ -80,7 +80,9 @@ class GenimaEvalWorkspace(Workspace):
         self._shutting_down = False
 
     def load_controller_ckpt(self, checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=self.eval_cfg.device)
+        checkpoint = torch.load(
+            checkpoint_path, map_location=self.eval_cfg.device, weights_only=False
+        )
 
         missing_keys = [
             k
@@ -297,6 +299,7 @@ class GenimaEvalWorkspace(Workspace):
 
 @hydra.main(config_path="cfgs", config_name="eval_act", version_base=None)
 def main(eval_cfg):
+    torch.serialization.add_safe_globals([DictConfig])
     train_cfg_path = Path(eval_cfg.train_cfg_path)
     train_cfg = OmegaConf.load(train_cfg_path)
 

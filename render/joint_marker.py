@@ -139,10 +139,11 @@ class JointMarker:
                 }
                 sphere_texture_name = color_mapping[sphere_colors[i]]
 
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            texture_path = os.path.join(script_dir, "sphere_textures", sphere_texture_name)
+
             sphere_texture = pyrender.Texture(
-                source=Image.open(
-                    os.path.join("./sphere_textures/", sphere_texture_name)
-                ).convert("RGBA"),
+                source=Image.open(texture_path).convert("RGBA"),
                 source_channels="RGBA",
             )
 

@@ -33,6 +33,7 @@ class JointNormalization(gym.ActionWrapper, gym.utils.RecordConstructorArgs):
         self.env = env
         self.action_stats = action_stats
         self.action_stats_path = action_stats_path
+        print(f"DEBUG: JointNormalization received action_stats_path: {self.action_stats_path}")
         assert (
             self.action_stats is not None or self.action_stats_path is not None
         ), print("either provide action stats dictionary or provide a path to it")

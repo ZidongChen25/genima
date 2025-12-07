@@ -32,9 +32,6 @@ class DiffusionAgent:
         if self.eval_cfg.fused_projections:
             self.pipe.fuse_qkv_projections(vae=False)
 
-        if self.eval_cfg.enable_xformers_memory_efficient_attention:
-            self.pipe.enable_xformers_memory_efficient_attention()
-
         self.pipe.set_progress_bar_config(
             disable=(not self.eval_cfg.show_diffusion_progress)
         )

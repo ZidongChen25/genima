@@ -15,7 +15,8 @@ video_fps: 30
 headless: True
 save_gen_image: False
 save_input_image: False
-save_image_path: '/tmp/'
+save_obs_image: True
+save_image_path: '/home/zc1525/Desktop/genima/ckpts/25_tasks/diffusion_sdturbo_R256x4_tiled/checkpoint-957000/input_images'
 device: 'cuda'
 safety_checker: null
 
@@ -35,7 +36,6 @@ image_resolution: 512
 show_diffusion_progress: False
 
 # Speed-up optimizations
-enable_xformers_memory_efficient_attention: True
 torch_compile: False
 channel_last: False
 allow_tf32: False

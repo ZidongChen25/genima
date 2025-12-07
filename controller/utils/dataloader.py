@@ -70,6 +70,7 @@ class EpochReplayBuffer(UniformReplayBuffer, Dataset):
             if not self._sequential:
                 # Sequential buffer does not need tp1 observations
                 replay_sample[name + "_tp1"] = episode[name][obs_next_idxs]
+        
         return replay_sample
 
     def __next__(self):

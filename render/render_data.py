@@ -168,6 +168,9 @@ class RenderData:
             low_dim_obs_path = os.path.join(
                 rgb_rendered_episode_path, "low_dim_obs.pkl"
             )
+            rgb_rendered_done_path = os.path.join(
+                rgb_rendered_episode_path, ".rgb_rendered_done"
+            )
 
         # Create tiled directories
         if self.cfg.draw.rnd_bg:
@@ -190,6 +193,27 @@ class RenderData:
                 f"episode{episode}",
             )
             low_dim_obs_path = os.path.join(rnd_bg_episode_path, "low_dim_obs.pkl")
+            rnd_bg_done_path = os.path.join(rnd_bg_episode_path, ".rnd_bg_done")
+
+        # Check if we should skip
+        if self.cfg.skip_existing:
+            skip_rgb = False
+            skip_rnd = False
+
+            if self.cfg.draw.rgb_rendered:
+                if os.path.exists(rgb_rendered_done_path):
+                    skip_rgb = True
+            else:
+                skip_rgb = True  # Effectively skipped if not requested
+
+            if self.cfg.draw.rnd_bg:
+                if os.path.exists(rnd_bg_done_path):
+                    skip_rnd = True
+            else:
+                skip_rnd = True  # Effectively skipped if not requested
+
+            if skip_rgb and skip_rnd:
+                return
 
         og_episode_path = os.path.join(
             dataset_root,
@@ -266,21 +290,23 @@ class RenderData:
 
                     colors.append(None)
 
+                # Render action (needed for both)
+                render = action_marker.render_action(
+                    curr_intrinsic,
+                    curr_extrinsic,
+                    joint_matrices,
+                    joint_opens,
+                    camera_scale=self.cfg.camera_scales[c_idx],
+                    sphere_colors=colors,
+                )
+                render = np.array(render)
+                render_rnd_bg = np.array(render)
+
+                white_space = np.all(render == [255, 255, 255], axis=-1)
+                occupied_space = np.any(render != [255, 255, 255], axis=-1)
+
                 # Draw actions with full-context background
                 if self.cfg.draw.rgb_rendered:
-                    render = action_marker.render_action(
-                        curr_intrinsic,
-                        curr_extrinsic,
-                        joint_matrices,
-                        joint_opens,
-                        camera_scale=self.cfg.camera_scales[c_idx],
-                        sphere_colors=colors,
-                    )
-                    render = np.array(render)
-                    render_rnd_bg = np.array(render)
-
-                    white_space = np.all(render == [255, 255, 255], axis=-1)
-                    occupied_space = np.any(render != [255, 255, 255], axis=-1)
                     render[white_space] = rgb[white_space]
 
                     pil_img = Image.fromarray(render)
@@ -321,6 +347,15 @@ class RenderData:
                         rgb_rendered_episode_path, "tiled_rgb_rendered", f"{ts}.png"
                     ),
                 )
+
+        # Create marker files
+        if self.cfg.draw.rgb_rendered:
+            with open(rgb_rendered_done_path, "w") as f:
+                f.write("done")
+
+        if self.cfg.draw.rnd_bg:
+            with open(rnd_bg_done_path, "w") as f:
+                f.write("done")
 
     def generate(self):
         """
@@ -385,14 +420,8 @@ class RenderData:
         if not os.path.exists(dst_folder):
             os.makedirs(dst_folder)
 
-        # Filter out depth and mask folders
-        def ignore_files(directory, contents):
-            # Filter out directories that contain 'depth' or 'mask' in their names
-            ignored = [name for name in contents if "depth" in name or "mask" in name]
-            return ignored
-
         # Use shutil.copytree to copy the directory and its contents
-        shutil.copytree(src_folder, dst_folder, dirs_exist_ok=True, ignore=ignore_files)
+        shutil.copytree(src_folder, dst_folder, dirs_exist_ok=True)
 
 
 class RenderDataParallel(RenderData):

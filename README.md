@@ -23,7 +23,7 @@ Genima is built with Python 3.10.12. We use poetry to manage dependencies.
 
 ```bash
 cd <install_dir>
-conda create -p genima_env python==3.10.12        # create conda env
+conda create -n genima_env python==3.10.12        # create conda env
 conda activate genima_env                         # activate env
 
 pip install poetry
@@ -31,7 +31,7 @@ poetry self add poetry-exec-plugin                # install plugin for executabl
 poetry self update
 
 cd <install_dir>
-git clone https://github.com/MohitShridhar/genima.git
+git clone
 cd genima
 poetry exec rlbench                               # install pyrep and rlbench
 poetry install                                    # install dependencies
@@ -58,12 +58,12 @@ poetry exec quick_start
 Generate a small `val` set of 10 episodes for `open_box` inside `/tmp/val_data`:
 
 ```bash
-mkdir /tmp/val_data
-cd genima/rlbench/tools
+
+cd rlbench/rlbench
 python dataset_generator.py \
-     --save_path=/tmp/val_data \
+     --save_path=data/val_data \
      --tasks=open_box \
-     --image_size=256,256 \
+     --image_size 256 256 \
      --renderer=opengl \
      --episodes_per_task=10 \
      --variations=1 \
@@ -77,18 +77,18 @@ Evaluate the pre-trained Genima agent:
 ```bash
 cd genima/controller
 python eval_genima.py \
-     task=open_box \
-     dataset_root=/tmp/val_data \
+     task=toilet_seat_up \
+     dataset_root=/home/zc1525/Desktop/genima/data/val_data \
      diffusion_ckpt=../ckpts/25_tasks/diffusion_sdturbo_R256x4_tiled \
      controller_ckpt=../ckpts/25_tasks/controller_act \
      num_eval_episodes=10 \
-     save_gen_images=False \
+     save_gen_image=True \
      num_diffusion_steps=5 \
      execution_horizon=20 \
      save_video=False \
      wandb.use=False \
      eval_type=latest \
-     headless=False
+     headless=True
 ```
 
 If you are on a headless machine, turn off RLBench visualization with `headless=True`.  
@@ -122,15 +122,15 @@ This guide covers how to train Genima from scratch.
 
 Use the `dataset_generator.py` tool to generate datasets:
 ```bash
-cd rlbench/tools
+cd rlbench/rlbench
 
 # generate train set
 python dataset_generator.py \
-     --save_path=/tmp/train_data \
-     --tasks=take_lid_off_saucepan \
-     --image_size=256,256 \
+     --save_path=../../data/train_data \
+     --tasks=turn_tap \
+     --image_size 256 256 \
      --renderer=opengl \
-     --episodes_per_task=25 \
+     --episodes_per_task=200\
      --variations=1 \
      --processes=1 \
      --arm_max_velocity 2.0 \
@@ -139,11 +139,11 @@ python dataset_generator.py \
 
 # generate val set
 python dataset_generator.py \
-     --save_path=/tmp/val_data \
-     --tasks=take_lid_off_saucepan \
-     --image_size=256,256 \
+     --save_path=../../data/val_data \
+     --tasks=open_microwave \
+     --image_size 256 256 \
      --renderer=opengl \
-     --episodes_per_task=10 \
+     --episodes_per_task=50 \
      --variations=1 \
      --processes=1 \
      --arm_max_velocity 2.0 \
@@ -162,12 +162,21 @@ poetry exec download_textures
 
 # use pyrender to place spheres that at joint-actions that t+20 timesteps ahead
 cd render
-python render_data.py \
-     episodes=25 \
-     dataset_root=/tmp/train_data \
-     textures_path=./mil_textures/object_textures \
+python render_random_bg.py \
+     episodes=200 \
+     dataset_root=/home/zc1525/Desktop/genima/data/train_data \
+     task=turn_tap \
+     textures_path=./textures/obj_textures \
      action_horizon=20 \
      num_processes=5
+
+python render_data_no_tex.py \
+     episodes=25 \
+     dataset_root=/home/zc1525/Desktop/genima/data/train_data \
+     action_horizon=20 \
+     num_processes=5 \
+     draw.rnd_bg=False
+
 ```
 By default, two dataset folders are generated: `rlbench_data_rgb_rendered` with observations and joint targets to train the diffusion agent, and `rlbench_data_rnd_bg` with random backgrounds and joint targets to train the controller. See the sample [notebook](notebooks/render.ipynb) for visual illustrations of the rendered data.
 
@@ -217,10 +226,22 @@ Monitor the training on wandb to check the quality of the generated targets. If 
 cd controller
 python train_act.py \
      env=rlbench \
-     env.dataset_root=/tmp/train_data_rnd_bg/ \
-     work_dir=/tmp/controller \
-     demos=25 \
-     env.train_tasks=[take_lid_off_saucepan] \
+     env.dataset_root=/home/zc1525/Desktop/genima/data/train_data_rnd_bg/ \
+     work_dir=/home/zc1525/Desktop/genima/ckpts/open_microwave_200demo \
+     demos=200 \
+     env.train_tasks='[open_microwave]' \
+     num_train_epochs=1000 \
+     action_sequence=20 \
+     batch_size=8 \
+     method.lr=1e-5 \
+     wandb.use=true
+
+python train_act_original.py \
+     env=rlbench \
+     env.dataset_root=/home/zc1525/Desktop/genima/data/train_data_rnd_bg/ \
+     work_dir=/home/zc1525/Desktop/genima/ckpts/original/lamp_on_50demo \
+     demos=50 \
+     env.train_tasks=[lamp_on] \
      num_train_epochs=1000 \
      action_sequence=20 \
      batch_size=8 \
@@ -239,19 +260,62 @@ To train the ACT baseline, set `env.dataset_root=/tmp/train_data` to use raw RGB
 ```bash
 # Use the diffusion agent and controller sequentially to evaluate
 python eval_genima.py \
-     task=take_lid_off_saucepan \
-     dataset_root=/tmp/val_data \
-     diffusion_ckpt=/tmp/diffusion_agent/sdturbo_1task_R256x4_tiled \
-     controller_ckpt=/tmp/controller \
-     num_eval_episodes=10 \
-     save_gen_images=False \
+     task=open_microwave \
+     dataset_root=/home/zc1525/Desktop/genima/data/val_data \
+     diffusion_ckpt=../ckpts/25_tasks/diffusion_sdturbo_R256x4_tiled \
+     controller_ckpt=/home/zc1525/Desktop/genima/ckpts/3_tasks_200demo/snapshots/genima_controller \
+     num_eval_episodes=50 \
+     save_gen_image=False \
      num_diffusion_steps=5 \
      execution_horizon=20 \
-     save_video=True \
+     save_video=False \
      wandb.use=True \
-     eval_type=last_three \
+     eval_type=latest \
+     headless=True
+
+python eval_genima.py \
+     task=turn_tap \
+     dataset_root=/home/zc1525/Desktop/genima/data/val_data \
+     diffusion_ckpt=../ckpts/25_tasks/diffusion_sdturbo_R256x4_tiled \
+     controller_ckpt=/home/zc1525/Desktop/genima/ckpts/3_tasks_200demo/snapshots/genima_controller \
+     num_eval_episodes=50 \
+     save_gen_image=False \
+     num_diffusion_steps=5 \
+     execution_horizon=20 \
+     save_video=False \
+     wandb.use=True \
+     eval_type=latest \
+     headless=True
+
+python eval_genima.py \
+     task=lamp_on \
+     dataset_root=/home/zc1525/Desktop/genima/data/val_data \
+     diffusion_ckpt=../ckpts/25_tasks/diffusion_sdturbo_R256x4_tiled \
+     controller_ckpt=/home/zc1525/Desktop/genima/ckpts/fixed_padding/lamp_on_50demo/snapshots/genima_controller \
+     num_eval_episodes=50 \
+     save_gen_image=False \
+     num_diffusion_steps=5 \
+     execution_horizon=20 \
+     save_video=False \
+     wandb.use=True \
+     eval_type=latest \
+     headless=True
+
+python eval_genima.py \
+     task=lamp_on \
+     dataset_root=/home/zc1525/Desktop/genima/data/val_data \
+     diffusion_ckpt=../ckpts/25_tasks/diffusion_sdturbo_R256x4_tiled \
+     controller_ckpt=/home/zc1525/Desktop/genima/ckpts/original/lamp_on_50demo/snapshots/genima_controller \
+     num_eval_episodes=50 \
+     save_gen_image=False \
+     num_diffusion_steps=5 \
+     execution_horizon=20 \
+     save_video=False \
+     wandb.use=True \
+     eval_type=latest \
      headless=True
 ```
+
 
 To run the evaluation offline, set `headless=False`. By setting `eval_type=last_three`, the script will sequentially evaluate the last three checkpoints and report average scores. Alternatively, you can set `eval_type=latest` or `eval_type=980` for specific checkpoints.  
 

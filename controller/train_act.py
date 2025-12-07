@@ -27,6 +27,13 @@ import numpy as np
 from gymnasium import spaces
 import gymnasium as gym
 from natsort import natsorted
+from omegaconf import DictConfig, ListConfig
+from omegaconf.base import ContainerMetadata, Metadata
+from omegaconf.nodes import AnyNode
+import typing
+import collections
+
+torch.serialization.add_safe_globals([DictConfig, ListConfig, ContainerMetadata, Metadata, typing.Any, dict, list, set, tuple, collections.defaultdict, collections.OrderedDict, AnyNode, int, float, str, bool])
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +47,13 @@ def _create_default_replay_buffer(
     extra_replay_elements = spaces.Dict({})
     if cfg.demos > 0:
         extra_replay_elements["demo"] = spaces.Box(0, 1, shape=(), dtype=np.uint8)
+    
+    # Add mask for action sequences
+    # shape should match action sequence length (which is action_space.shape[0])
+    # But wait, action_space.shape is (20, 8). So sequence length is 20.
+    # Hardcode shape to 20 to avoid any ambiguity
+    extra_replay_elements["mask_seq"] = spaces.Box(0, 1, shape=(20,), dtype=np.int32)
+
     # Create replay_class with buffer-specific hyperparameters
     replay_class = EpochReplayBuffer
     replay_class = partial(
@@ -52,7 +66,7 @@ def _create_default_replay_buffer(
         save_dir=cfg.replay.save_dir,
         batch_size=cfg.batch_size if not demo_replay else cfg.demo_batch_size,
         replay_capacity=cfg.replay.size if not demo_replay else cfg.replay.demo_size,
-        action_shape=action_space.shape,
+        action_shape=(1,) + action_space.shape,
         action_dtype=action_space.dtype,
         reward_shape=(),
         reward_dtype=np.float32,
@@ -152,9 +166,11 @@ class ControllerWorkspace(Workspace):
 
         self.replay_loader = DataLoader(
             self.replay_buffer,
-            batch_size=self.replay_buffer.batch_size,
-            num_workers=0,
-            pin_memory=cfg.replay.pin_memory,
+            batch_size=cfg.batch_size,
+            shuffle=False,
+            num_workers=8,
+            pin_memory=False,
+            drop_last=True,
             worker_init_fn=_worker_init_fn,
         )
         self._replay_iter = None

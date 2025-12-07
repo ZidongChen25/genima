@@ -244,6 +244,20 @@ def add_demo_to_replay_buffer(wrapped_env: DemoEnv, replay_buffer: ReplayBuffer)
     for act, obs, rew, term, trunc, info, next_info in ep:
         obs_and_info = {k: v[-1] for k, v in obs.items()}  # remove temporal
         obs_and_info.update({"demo": info["demo"]})
+        
+        # Mask is in next_info because it describes the execution of the action
+        # DEBUG: Print extra_replay_elements keys
+        # print(f"DEBUG: extra_replay_elements keys: {replay_buffer.extra_replay_elements.keys()}")
+        if "mask_seq" in replay_buffer.extra_replay_elements.keys():
+            if "action_sequence_mask" in next_info:
+                obs_and_info["mask_seq"] = next_info["action_sequence_mask"]
+            elif "action_sequence_mask" in info:
+                 obs_and_info["mask_seq"] = info["action_sequence_mask"]
+            else:
+                # Fallback for when wrapper is not used or mask is missing
+                # Assume all valid
+                obs_and_info["mask_seq"] = np.ones((act.shape[0],), dtype=np.int32)
+
         for key, value in obs.items():
             if isinstance(value, np.ndarray) and value.shape[0] == 1:
                 obs[key] = value.squeeze(0)

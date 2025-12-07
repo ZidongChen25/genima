@@ -43,6 +43,9 @@ action_horizon: 20
 # alpha blend between original image and random texture
 alpha_blend: 0.7
 
+# skip existing episodes
+skip_existing: True
+
 # render configuration
 render:
   sphere:
