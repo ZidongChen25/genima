@@ -11,6 +11,6 @@ env:
   dataset_root: ''
   action_mode: JOINT_POSITION
   cameras: ["wrist", "front", "right_shoulder", "left_shoulder"]
-  renderer: opengl3
+  renderer: opengl
   arm_max_velocity: 1.0
   arm_max_acceleration: 4.0

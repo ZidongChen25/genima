@@ -53,6 +53,8 @@ def _create_default_replay_buffer(
         replay_class,
         nstep=cfg.replay.nstep,
         gamma=cfg.replay.gamma,
+        tail_noise_n=cfg.replay.tail_noise_n,
+        tail_noise_std=cfg.replay.tail_noise_std,
     )
     # Create replay_class with common hyperparameters
     return replay_class(
@@ -140,6 +142,12 @@ class Workspace:
             if sys.platform == "darwin":
                 dev = "mps"
             else:
+                if not torch.cuda.is_available():
+                    raise RuntimeError(
+                        "num_gpus > 0 but CUDA is not available in this process. "
+                        "Check NVIDIA driver/runtime visibility, or run with "
+                        "`num_gpus=0` to force CPU."
+                    )
                 dev = 0
                 job_num = False
                 try:
@@ -160,7 +168,7 @@ class Workspace:
             self.env_factory.collect_or_fetch_demos(cfg, num_demos)
 
         # Make training environment
-        if cfg.num_train_envs > 0:
+        if cfg.create_train_env and cfg.num_train_envs > 0:
             self.train_envs = self.env_factory.make_train_env(cfg)
         else:
             self.train_envs = None
@@ -173,9 +181,15 @@ class Workspace:
             # Post-process demos using the information from environments
             self.env_factory.post_collect_or_fetch_demos(cfg)
 
-        # Create the RL Agent
-        observation_space = self.eval_env.observation_space
-        action_space = self.eval_env.action_space
+        # Create the RL Agent.
+        # For vectorized eval envs, use single_*_space to avoid including
+        # leading env-batch dimensions while preserving wrapper-transformed shapes.
+        observation_space = getattr(
+            self.eval_env, "single_observation_space", self.eval_env.observation_space
+        )
+        action_space = getattr(
+            self.eval_env, "single_action_space", self.eval_env.action_space
+        )
 
         intrinsic_reward_module = None
         if cfg.get("intrinsic_reward_module", None):
@@ -277,9 +291,9 @@ class Workspace:
     def global_env_steps(self):
         """Total number of environment steps taken."""
         if not self.train_envs:
-            # If train envs is not enabled, we are in pure evaluation mode.
-            # Return 0 as there is no global frame.
-            return 0
+            # Offline/pretrain-only mode: use pretrain steps for stable
+            # checkpoint/video naming and logging progression.
+            return int(self.pretrain_steps)
 
         # TODO: Pretrain_steps should not be included in env_steps, because it's
         # training steps but not environment steps. We need another PR to address this
@@ -305,8 +319,11 @@ class Workspace:
 
     def train(self):
         signal.signal(signal.SIGINT, self._signal_handler)
-        if not self.train_envs:
-            raise Exception("Train envs not created! Train can't be called!")
+        if not self.train_envs and self.cfg.num_train_frames > 0:
+            raise Exception(
+                "Train envs not created but num_train_frames > 0. "
+                "Set create_train_env=true or num_train_frames=0 for offline training."
+            )
         try:
             self._train()
         except Exception as e:
@@ -320,8 +337,9 @@ class Workspace:
         # Perform pretraining. This is suitable for behaviour cloning or Offline RL
         self._pretrain_on_demos()
 
-        # Perform online rl with exploration.
-        self._online_rl()
+        # Perform online RL only when a train env exists and frames are requested.
+        if self.train_envs is not None and self.cfg.num_train_frames > 0:
+            self._online_rl()
 
         if self.cfg.save_snapshot:
             self.save_snapshot()
@@ -331,59 +349,217 @@ class Workspace:
     def eval(self) -> dict[str, Any]:
         return self._eval(eval_record_all_episode=True)
 
+    @staticmethod
+    def _extract_task_success(info: dict[str, Any], env_index: int):
+        if not isinstance(info, dict):
+            return None
+        if "task_success" in info:
+            value = info["task_success"]
+            arr = np.asarray(value)
+            try:
+                mask = info.get("_task_success", None)
+                if mask is not None:
+                    mask_arr = np.asarray(mask)
+                    if mask_arr.ndim > 0 and env_index < mask_arr.shape[0]:
+                        if not bool(mask_arr[env_index]):
+                            # This slot does not contain valid task_success.
+                            pass
+                if arr.ndim == 0:
+                    return int(arr.item())
+                if env_index < arr.shape[0]:
+                    return int(np.asarray(arr[env_index]).item())
+            except Exception:
+                pass
+        final_info = info.get("final_info", None)
+        if isinstance(final_info, np.ndarray):
+            try:
+                final_info = final_info.tolist()
+            except Exception:
+                pass
+        if isinstance(final_info, (list, tuple)) and env_index < len(final_info):
+            env_final_info = final_info[env_index]
+            if isinstance(env_final_info, dict) and "task_success" in env_final_info:
+                try:
+                    return int(np.asarray(env_final_info["task_success"]).item())
+                except Exception:
+                    return None
+        if isinstance(final_info, dict) and "task_success" in final_info:
+            try:
+                return int(np.asarray(final_info["task_success"]).item())
+            except Exception:
+                return None
+        return None
+
     def _eval(self, eval_record_all_episode: bool = False) -> dict[str, Any]:
         # TODO: In future, this func could do with a further refactor
         self.agent.set_eval_env_running(True)
-        step, episode, total_reward, successes = 0, 0, 0, 0
-        eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
-        first_rollout = []
-        metrics = {}
-        while eval_until_episode(episode):
-            observation, info = self.eval_env.reset()
-            # eval agent always has last id (ids start from 0)
-            self.agent.reset(self.main_loop_iterations, [self.train_envs.num_envs])
-            enabled = eval_record_all_episode or episode == 0
-            self.eval_video_recorder.init(self.eval_env, enabled=enabled)
-            termination, truncation = False, False
-            while not (termination or truncation):
-                (
-                    action,
-                    (next_observation, reward, termination, truncation, next_info),
-                    env_metrics,
-                ) = self._perform_env_steps(observation, self.eval_env, True)
-                observation = next_observation
-                info = next_info
-                metrics.update(env_metrics)
-                # Below is testing a feature wich can be enforced in v6.
-                # The ability will allow agent info to be passed to envirionments.
-                # This will be habdy for rednering any auxiliary outputs.
-                if "agent_act_info" in env_metrics:
-                    if hasattr(self.eval_env, "give_agent_info"):
-                        self.eval_env.give_agent_info(env_metrics["agent_act_info"])
-                self.eval_video_recorder.record(self.eval_env)
-                total_reward += reward
-                step += 1
-            if episode == 0:
+        try:
+            num_eval_episodes = int(self.cfg.num_eval_episodes)
+            eval_verbose = bool(self.cfg.get("eval_verbose", False))
+            eval_agent_id = (
+                int(self.cfg.eval_agent_id)
+                if "eval_agent_id" in self.cfg
+                else (
+                    self.train_envs.num_envs
+                    if self.train_envs
+                    else int(getattr(self.cfg, "num_train_envs", 0))
+                )
+            )
+            metrics = {}
+            first_rollout = []
+            completed_rewards = []
+            completed_lengths = []
+            completed_successes = []
+
+            is_vector_eval = bool(getattr(self.eval_env, "is_vector_env", False))
+            if is_vector_eval:
+                num_eval_envs = int(getattr(self.eval_env, "num_envs", 1))
+                observation, info = self.eval_env.reset()
+                self.agent.reset(
+                    self.main_loop_iterations,
+                    [eval_agent_id + i for i in range(num_eval_envs)],
+                )
+                self.eval_video_recorder.init(
+                    self.eval_env, enabled=(eval_record_all_episode or True)
+                )
+                active_rewards = np.zeros(num_eval_envs, dtype=np.float64)
+                active_lengths = np.zeros(num_eval_envs, dtype=np.int32)
+
+                while len(completed_rewards) < num_eval_episodes:
+                    (
+                        action,
+                        (next_observation, reward, termination, truncation, next_info),
+                        env_metrics,
+                    ) = self._perform_env_steps(
+                        observation, self.eval_env, True, vector_eval=True
+                    )
+                    del action
+                    observation = next_observation
+                    info = next_info
+                    metrics.update(env_metrics)
+                    if "agent_act_info" in env_metrics:
+                        if hasattr(self.eval_env, "give_agent_info"):
+                            self.eval_env.give_agent_info(env_metrics["agent_act_info"])
+                    self.eval_video_recorder.record(self.eval_env)
+
+                    rewards = np.asarray(reward, dtype=np.float64).reshape(-1)
+                    dones = np.logical_or(
+                        np.asarray(termination, dtype=bool).reshape(-1),
+                        np.asarray(truncation, dtype=bool).reshape(-1),
+                    )
+                    active_rewards += rewards
+                    active_lengths += 1
+
+                    done_indices = np.flatnonzero(dones)
+                    if done_indices.size > 0:
+                        reset_ids = []
+                        for done_idx in done_indices:
+                            if len(completed_rewards) >= num_eval_episodes:
+                                break
+                            done_idx = int(done_idx)
+                            ep_reward = float(active_rewards[done_idx])
+                            ep_length = float(
+                                active_lengths[done_idx] * self.cfg.action_repeat
+                            )
+                            success_value = self._extract_task_success(info, done_idx)
+
+                            completed_rewards.append(ep_reward)
+                            completed_lengths.append(ep_length)
+                            if success_value is not None:
+                                completed_successes.append(success_value)
+
+                            if eval_verbose:
+                                print(
+                                    f"[eval] episode {len(completed_rewards)}/"
+                                    f"{num_eval_episodes} reward={ep_reward:.4f} "
+                                    f"success={success_value}"
+                                )
+                            active_rewards[done_idx] = 0.0
+                            active_lengths[done_idx] = 0
+                            reset_ids.append(eval_agent_id + done_idx)
+
+                        if len(reset_ids) > 0:
+                            self.agent.reset(self.main_loop_iterations, reset_ids)
+
                 first_rollout = np.array(self.eval_video_recorder.frames)
-            self.eval_video_recorder.save(f"{self.global_env_steps}.mp4")
-            success = info.get("task_success")
-            if success is not None:
-                successes += np.array(success).astype(int).item()
+                self.eval_video_recorder.save(f"{self.global_env_steps}.mp4")
             else:
-                successes = None
-            episode += 1
-        metrics.update(
-            {
-                "episode_reward": total_reward / episode,
-                "episode_length": step * self.cfg.action_repeat / episode,
-            }
-        )
-        if successes is not None:
-            metrics["episode_success"] = successes / episode
-        if self.cfg.log_eval_video and len(first_rollout) > 0:
-            metrics["eval_rollout"] = dict(video=first_rollout, fps=4)
-        self.agent.set_eval_env_running(False)
-        return metrics
+                step, episode, total_reward, successes = 0, 0, 0, 0
+                eval_until_episode = utils.Until(num_eval_episodes)
+                while eval_until_episode(episode):
+                    observation, info = self.eval_env.reset()
+                    self.agent.reset(self.main_loop_iterations, [eval_agent_id])
+                    enabled = eval_record_all_episode or episode == 0
+                    self.eval_video_recorder.init(self.eval_env, enabled=enabled)
+                    termination, truncation = False, False
+                    while not (termination or truncation):
+                        (
+                            action,
+                            (next_observation, reward, termination, truncation, next_info),
+                            env_metrics,
+                        ) = self._perform_env_steps(observation, self.eval_env, True)
+                        del action
+                        observation = next_observation
+                        info = next_info
+                        metrics.update(env_metrics)
+                        if "agent_act_info" in env_metrics:
+                            if hasattr(self.eval_env, "give_agent_info"):
+                                self.eval_env.give_agent_info(env_metrics["agent_act_info"])
+                        self.eval_video_recorder.record(self.eval_env)
+                        total_reward += reward
+                        step += 1
+                    if episode == 0:
+                        first_rollout = np.array(self.eval_video_recorder.frames)
+                    if eval_record_all_episode:
+                        video_name = f"{self.global_env_steps}_ep{episode}.mp4"
+                    else:
+                        video_name = f"{self.global_env_steps}.mp4"
+                    self.eval_video_recorder.save(video_name)
+                    success = info.get("task_success")
+                    if success is not None:
+                        success_value = np.array(success).astype(int).item()
+                        successes += success_value
+                    else:
+                        success_value = None
+                        successes = None
+                    if eval_verbose:
+                        print(
+                            f"[eval] episode {episode + 1}/{num_eval_episodes} "
+                            f"reward={float(reward):.4f} success={success_value}"
+                        )
+                    episode += 1
+                completed_rewards = [float(total_reward / max(episode, 1))]
+                completed_lengths = [float(step * self.cfg.action_repeat / max(episode, 1))]
+                if successes is not None:
+                    completed_successes = [float(successes / max(episode, 1))]
+
+            if len(completed_rewards) == 0:
+                raise RuntimeError("Evaluation produced zero completed episodes.")
+
+            if is_vector_eval:
+                metrics.update(
+                    {
+                        "episode_reward": float(np.mean(completed_rewards)),
+                        "episode_length": float(np.mean(completed_lengths)),
+                    }
+                )
+                if len(completed_successes) > 0:
+                    metrics["episode_success"] = float(np.mean(completed_successes))
+            else:
+                metrics.update(
+                    {
+                        "episode_reward": completed_rewards[0],
+                        "episode_length": completed_lengths[0],
+                    }
+                )
+                if len(completed_successes) > 0:
+                    metrics["episode_success"] = completed_successes[0]
+
+            if self.cfg.log_eval_video and len(first_rollout) > 0:
+                metrics["eval_rollout"] = dict(video=first_rollout, fps=4)
+            return metrics
+        finally:
+            self.agent.set_eval_env_running(False)
 
     def _add_to_replay(
         self,
@@ -512,7 +688,8 @@ class Workspace:
             start_time = time.time()
         metrics = {}
         self.agent.train(True)
-        for i in range(self.train_envs.num_envs):
+        num_update_slots = self.train_envs.num_envs if self.train_envs is not None else 1
+        for i in range(num_update_slots):
             if (self.main_loop_iterations + i) % self.cfg.update_every_steps != 0:
                 # Skip update
                 continue
@@ -525,23 +702,34 @@ class Workspace:
         if self.agent.logging:
             execution_time_for_update = time.time() - start_time
             metrics["agent_batched_updates_per_second"] = (
-                self.train_envs.num_envs / execution_time_for_update
+                num_update_slots / execution_time_for_update
             )
             metrics["agent_updates_per_second"] = (
-                self.train_envs.num_envs * self.cfg.batch_size
+                num_update_slots * self.cfg.batch_size
             ) / execution_time_for_update
         return metrics
 
     def _perform_env_steps(
-        self, observations: dict[str, np.ndarray], env: gym.Env, eval_mode: bool
+        self,
+        observations: dict[str, np.ndarray],
+        env: gym.Env,
+        eval_mode: bool,
+        vector_eval: bool = False,
     ) -> tuple[np.ndarray, tuple, dict[str, Any]]:
+        env_batch_size = int(
+            getattr(
+                env,
+                "num_envs",
+                self.train_envs.num_envs if self.train_envs is not None else 1,
+            )
+        )
         if self.agent.logging:
             start_time = time.time()
         with torch.no_grad(), utils.eval_mode(self.agent):
             torch_observations = {
                 k: torch.from_numpy(v).to(self.device) for k, v in observations.items()
             }
-            if eval_mode:
+            if eval_mode and not vector_eval:
                 torch_observations = {
                     k: v.unsqueeze(0) for k, v in torch_observations.items()
                 }
@@ -561,13 +749,13 @@ class Workspace:
                     "Expected actions from `agent.act` to have shape "
                     "(Batch, Timesteps, Action Dim)."
                 )
-            if eval_mode:
+            if eval_mode and not vector_eval:
                 action = action[0]  # we expect batch of 1 for eval
 
         if self.agent.logging:
             execution_time_for_act = time.time() - start_time
             metrics["agent_act_steps_per_second"] = (
-                self.train_envs.num_envs / execution_time_for_act
+                env_batch_size / execution_time_for_act
             )
             start_time = time.time()
 
@@ -576,11 +764,20 @@ class Workspace:
         if self.agent.logging:
             execution_time_for_env_step = time.time() - start_time
             metrics["env_steps_per_second"] = (
-                self.train_envs.num_envs / execution_time_for_env_step
+                env_batch_size / execution_time_for_env_step
             )
             for k, v in next_info.items():
-                # if train env, then will be vectorised, so get first elem
-                metrics[f"env_info/{k}"] = v if eval_mode else v[0]
+                if eval_mode:
+                    if vector_eval:
+                        v_arr = np.asarray(v)
+                        metrics[f"env_info/{k}"] = (
+                            v_arr[0] if v_arr.ndim > 0 else v_arr.item()
+                        )
+                    else:
+                        metrics[f"env_info/{k}"] = v
+                else:
+                    # train env is vectorised, so log env0 by default.
+                    metrics[f"env_info/{k}"] = v[0]
 
         return action, (*env_step_tuple, next_info), metrics
 
@@ -589,6 +786,8 @@ class Workspace:
             pre_train_until_step = utils.Until(self.cfg.num_pretrain_steps)
             should_pretrain_log = utils.Every(self.cfg.log_pretrain_every)
             should_pretrain_eval = utils.Every(self.cfg.eval_every_steps)
+            snapshot_every_n = self.cfg.snapshot_every_n if self.cfg.save_snapshot else 0
+            should_pretrain_snapshot = utils.Every(snapshot_every_n)
             if self.cfg.log_pretrain_every > 0:
                 assert self.cfg.num_pretrain_steps % self.cfg.log_pretrain_every == 0
             if len(self.replay_buffer) <= 0:
@@ -616,6 +815,12 @@ class Workspace:
                     self.logger.log_metrics(
                         eval_metrics, self.pretrain_steps, prefix="pretrain_eval"
                     )
+
+                # Periodic checkpointing during pretraining.
+                if self.pretrain_steps > 0 and should_pretrain_snapshot(
+                    self.pretrain_steps
+                ):
+                    self.save_snapshot()
 
                 self._pretrain_step += 1
 
@@ -709,7 +914,8 @@ class Workspace:
         if self.eval_env:
             self.eval_env.close()
 
-        self.train_envs.close()
+        if self.train_envs:
+            self.train_envs.close()
         self.replay_buffer.shutdown()
         if self.use_demo_replay:
             self.demo_replay_buffer.shutdown()
@@ -725,6 +931,7 @@ class Workspace:
         ]
         payload = {k: self.__dict__[k] for k in keys_to_save}
         payload["agent"] = self.agent.state_dict()
+        payload["agent_ema"] = self._collect_agent_ema_states()
         with snapshot.open("wb") as f:
             torch.save(payload, f)
         latest_snapshot = self.work_dir / "snapshots" / "latest_snapshot.pt"
@@ -744,5 +951,96 @@ class Workspace:
         with path_to_snapshot_to_load.open("rb") as f:
             payload = torch.load(f, map_location="cpu", weights_only=False)
         self.agent.load_state_dict(payload.pop("agent"))
+        self._restore_agent_ema_states(payload.pop("agent_ema", None))
         for k, v in payload.items():
             self.__dict__[k] = v
+
+    def _collect_agent_ema_states(self) -> dict[str, dict]:
+        ema_states = {}
+        for module_name, module in self.agent.named_modules():
+            ema = getattr(module, "ema", None)
+            if ema is None or not hasattr(ema, "state_dict"):
+                continue
+            ema_states[module_name] = ema.state_dict()
+        return ema_states
+
+    def _restore_agent_ema_states(self, ema_states: dict[str, dict] | None) -> None:
+        module_map = dict(self.agent.named_modules())
+        if not ema_states:
+            rebuilt = self._rebuild_missing_ema_states()
+            if rebuilt:
+                logging.warning(
+                    "Snapshot has no EMA states. Rebuilt EMA shadow params from "
+                    "module weights for: %s",
+                    ", ".join(rebuilt),
+                )
+            return
+
+        restored = []
+        for module_name, state_dict in ema_states.items():
+            module = module_map.get(module_name)
+            if module is None:
+                continue
+            ema = getattr(module, "ema", None)
+            if ema is None or not hasattr(ema, "load_state_dict"):
+                continue
+            ema.load_state_dict(state_dict)
+            if hasattr(ema, "to"):
+                try:
+                    ema.to(device=self.device)
+                except TypeError:
+                    ema.to(self.device)
+            restored.append(module_name)
+
+        rebuilt = self._rebuild_missing_ema_states(skip_modules=set(restored))
+        if rebuilt:
+            logging.warning(
+                "Rebuilt EMA shadow params from module weights for missing modules: %s",
+                ", ".join(rebuilt),
+            )
+
+        if not restored and not rebuilt:
+            logging.warning(
+                "Snapshot contained EMA states but none could be applied to current "
+                "agent modules."
+            )
+
+    def _rebuild_missing_ema_states(
+        self, skip_modules: set[str] | None = None
+    ) -> list[str]:
+        rebuilt_modules = []
+        if skip_modules is None:
+            skip_modules = set()
+        for module_name, module in self.agent.named_modules():
+            if module_name in skip_modules:
+                continue
+            ema = getattr(module, "ema", None)
+            if ema is None or not hasattr(ema, "shadow_params"):
+                continue
+
+            source_module = None
+            # Preferred for diffusion BC snapshots: ema_actor stores averaged weights.
+            if hasattr(module, "ema_actor") and isinstance(
+                getattr(module, "ema_actor"), torch.nn.Module
+            ):
+                source_module = module.ema_actor
+            elif hasattr(module, "actor_model") and isinstance(
+                getattr(module, "actor_model"), torch.nn.Module
+            ):
+                source_module = module.actor_model
+            elif hasattr(module, "actor") and isinstance(
+                getattr(module, "actor"), torch.nn.Module
+            ):
+                source_module = module.actor
+
+            if source_module is None:
+                continue
+
+            ema.shadow_params = [p.detach().clone() for p in source_module.parameters()]
+            if hasattr(ema, "to"):
+                try:
+                    ema.to(device=self.device)
+                except TypeError:
+                    ema.to(self.device)
+            rebuilt_modules.append(module_name)
+        return rebuilt_modules

@@ -35,7 +35,9 @@ class EnvFactory:
         """
         raise NotImplementedError("This env does not support demo loading.")
 
-    def load_demos_into_replay(self, cfg: DictConfig, buffer):
+    def load_demos_into_replay(
+        self, cfg: DictConfig, buffer, is_demo_buffer: bool = False
+    ):
         """Load the collected or fetched demos into the replay buffer.
 
         Args:

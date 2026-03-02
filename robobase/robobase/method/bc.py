@@ -225,15 +225,19 @@ class BC(Method):
         )
         return rgb_obs, next_rgb_obs, metrics
 
-    def update_actor(self, low_dim_obs, fused_view_feats, action, loss_coeff):
+    def update_actor(
+        self, low_dim_obs, fused_view_feats, action, loss_coeff, action_mask=None
+    ):
         metrics = dict()
         action_pred = self.actor(low_dim_obs, fused_view_feats)
-        # TOOD check trajectory horrizon
-        mse_loss = (
-            F.mse_loss(action_pred, action, reduction="none")
-            .mean(-1)
-            .mean(-1, keepdims=True)
-        )
+        # Shape: (B, T). Reduce action dims first, then optionally mask padded steps.
+        step_mse = F.mse_loss(action_pred, action, reduction="none").mean(-1)
+        if action_mask is not None:
+            action_mask = action_mask.float()
+            valid_steps = action_mask.sum(-1).clamp_min(1.0)
+            mse_loss = ((step_mse * action_mask).sum(-1) / valid_steps).unsqueeze(-1)
+        else:
+            mse_loss = step_mse.mean(-1, keepdims=True)
         actor_loss = (mse_loss * loss_coeff.unsqueeze(1)).mean()
 
         new_pri = torch.sqrt(mse_loss + 1e-10)
@@ -352,6 +356,7 @@ class BC(Method):
         batch = next(replay_iter)
         batch = {k: v.to(self.device) for k, v in batch.items()}
         action = batch["action"]
+        action_mask = batch["mask"] if "mask" in batch else None
         loss_coeff = loss_weights(batch, self.replay_beta)
         low_dim_obs = None
         fused_view_feats = None
@@ -372,7 +377,9 @@ class BC(Method):
         if fused_view_feats is not None:
             fused_view_feats = fused_view_feats.detach()
         metrics.update(
-            self.update_actor(low_dim_obs, fused_view_feats, action, loss_coeff)
+            self.update_actor(
+                low_dim_obs, fused_view_feats, action, loss_coeff, action_mask
+            )
         )
 
         if isinstance(replay_buffer, PrioritizedReplayBuffer):

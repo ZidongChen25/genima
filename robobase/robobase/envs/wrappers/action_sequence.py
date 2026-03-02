@@ -26,16 +26,37 @@ class ActionSequence(gym.ActionWrapper, gym.utils.RecordConstructorArgs):
             np.expand_dims(high, 0).repeat(sequence_length, 0),
             dtype=self.action_space.dtype,
         )
+        self._record_sim_frames = False
+        self._last_step_frames = []
+
+    def set_record_sim_frames(self, enabled: bool):
+        self._record_sim_frames = bool(enabled)
+        if not enabled:
+            self._last_step_frames = []
+
+    def consume_last_step_frames(self):
+        frames = self._last_step_frames
+        self._last_step_frames = []
+        return frames
+
+    def _capture_sim_frame(self):
+        if not self._record_sim_frames:
+            return
+        frame = self.env.render()
+        if frame is not None:
+            self._last_step_frames.append(frame)
 
     def _step_sequence(self, action):
         total_reward = np.array(0.0)
         action_idx_reached = 0
+        self._last_step_frames = []
         if self.is_demo_env:
             demo_actions = np.array(action)
         for i, sub_action in enumerate(action):
             observation, reward, termination, truncation, info = self.env.step(
                 sub_action
             )
+            self._capture_sim_frame()
             if self.is_demo_env:
                 demo_actions[i] = info.pop("demo_action")
             total_reward += reward
@@ -122,6 +143,7 @@ class RecedingHorizonControl(ActionSequence):
     def _step_sequence(self, action):
         total_reward = np.array(0.0)
         action_idx_reached = 0
+        self._last_step_frames = []
         if self.is_demo_env:
             demo_actions = np.array(action)
 
@@ -147,6 +169,7 @@ class RecedingHorizonControl(ActionSequence):
             observation, reward, termination, truncation, info = self.env.step(
                 sub_action
             )
+            self._capture_sim_frame()
             self._cur_step += 1
             if self.is_demo_env:
                 demo_actions[i] = info.pop("demo_action")

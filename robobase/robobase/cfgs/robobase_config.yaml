@@ -14,6 +14,7 @@ num_pretrain_steps: 0
 num_train_frames: 1100000
 eval_every_steps: 10000
 num_eval_episodes: 10
+num_eval_envs: 1
 update_every_steps: 2
 num_explore_steps: 2000
 save_snapshot: false
@@ -58,13 +59,15 @@ replay:
   beta: 0.5  # prioritization
   sequential: false
   transition_seq_len: 1  # The length of transition sequence returned from sample() call. Only applicable if sequential is True
+  tail_noise_n: 0  # If > 0, replace the last N actions in each sampled chunk with Gaussian noise
+  tail_noise_std: 0.0  # Std for the Gaussian tail noise
 
 # logging settings
 wandb:  # weight and bias
   use: true
   project: act_bigym
   entity: younggyo
-  name: act
+  name: ${experiment_name}
 
 tb:  # TensorBoard
   use: false

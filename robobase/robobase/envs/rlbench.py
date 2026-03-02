@@ -2,6 +2,7 @@ import os
 import time
 import importlib
 import warnings
+import traceback
 from typing import List
 from enum import Enum
 from functools import partial
@@ -458,7 +459,24 @@ class RLBenchEnv(gym.Env):
                 "dataset_root was not defined. Generating live demos. "
                 "This may take a while..."
             )
-        raw_demos = self._task.get_demos(num_demos, live_demos=live_demos)
+        if live_demos:
+            raw_demos = self._task.get_demos(num_demos, live_demos=True)
+        else:
+            # Keep demo sampling deterministic for stable action statistics.
+            try:
+                raw_demos = self._task.get_demos(
+                    num_demos,
+                    live_demos=False,
+                    random_selection=False,
+                    from_episode_number=0,
+                )
+            except TypeError:
+                # Backward compatibility for older RLBench versions.
+                raw_demos = self._task.get_demos(
+                    num_demos,
+                    live_demos=False,
+                    random_selection=False,
+                )
         match self._action_mode_type:
             case ActionModeType.END_EFFECTOR_POSE:
                 raw_demos = self.get_nbp_demos(raw_demos)
@@ -521,9 +539,10 @@ def _make_obs_config(cfg: DictConfig):
     return obs_config
 
 
-def _get_demo_fn(cfg, num_demos, demo_list):
-    obs_config = _make_obs_config(cfg)
-    obs_config_demo = copy.deepcopy(obs_config)
+def _get_demo_fn(cfg, num_demos, demo_list, error_list=None):
+    try:
+        obs_config = _make_obs_config(cfg)
+        obs_config_demo = copy.deepcopy(obs_config)
 
     # RLBench demos are all saved in same action mode (joint).
     # For conversion to an alternate action mode, additional
@@ -531,36 +550,40 @@ def _get_demo_fn(cfg, num_demos, demo_list):
     # reflect this and ensure low_dim_state is consitent
     # for demo and rollout steps.
 
-    match ActionModeType[cfg.env.action_mode]:
-        case ActionModeType.END_EFFECTOR_POSE:
-            obs_config_demo.joint_velocities = True
-            obs_config_demo.gripper_matrix = True
+        match ActionModeType[cfg.env.action_mode]:
+            case ActionModeType.END_EFFECTOR_POSE:
+                obs_config_demo.joint_velocities = True
+                obs_config_demo.gripper_matrix = True
 
-        case ActionModeType.JOINT_POSITION:
-            pass
+            case ActionModeType.JOINT_POSITION:
+                pass
 
-        case _:
-            raise ValueError(f"Unsupported action mode type: {cfg.env.action_mode}")
+            case _:
+                raise ValueError(f"Unsupported action mode type: {cfg.env.action_mode}")
 
     # Get common true attribute in both configs and alter ROBOT_STATE_KEYS
-    common_true = [
-        attr_name
-        for attr_name in dir(obs_config_demo)
-        if isinstance(getattr(obs_config_demo, attr_name), bool)
-        and getattr(obs_config_demo, attr_name)
-        and getattr(obs_config, attr_name)
-        # if "camera" not in attr_name
-    ]
-    demo_state_keys = copy.deepcopy(ROBOT_STATE_KEYS)
-    for attr in common_true:
-        demo_state_keys.remove(attr)
+        common_true = [
+            attr_name
+            for attr_name in dir(obs_config_demo)
+            if isinstance(getattr(obs_config_demo, attr_name), bool)
+            and getattr(obs_config_demo, attr_name)
+            and getattr(obs_config, attr_name)
+            # if "camera" not in attr_name
+        ]
+        demo_state_keys = copy.deepcopy(ROBOT_STATE_KEYS)
+        for attr in common_true:
+            demo_state_keys.remove(attr)
 
-    rlb_env = _make_env(cfg, obs_config_demo)
-    rlb_env.reset(robot_state_keys=demo_state_keys)
+        rlb_env = _make_env(cfg, obs_config_demo)
+        rlb_env.reset(robot_state_keys=demo_state_keys)
 
-    demos = rlb_env.get_demos(num_demos, robot_state_keys=demo_state_keys)
-    demo_list.extend(demos)
-    rlb_env.close()
+        demos = rlb_env.get_demos(num_demos, robot_state_keys=demo_state_keys)
+        demo_list.extend(demos)
+        rlb_env.close()
+    except Exception:
+        if error_list is not None:
+            error_list.append(traceback.format_exc())
+        raise
 
 
 def _get_spaces(cfg, space_list):
@@ -699,29 +722,89 @@ class RLBenchEnvFactory(EnvFactory):
 
     def make_eval_env(self, cfg: DictConfig) -> gym.Env:
         obs_config = _make_obs_config(cfg)
-        # NOTE: Assumes workspace always creates eval_env in the main thread
-        env, (self._action_space, self._observation_space) = self._wrap_env(
+        num_eval_envs = int(getattr(cfg, "num_eval_envs", 1))
+        if num_eval_envs <= 1:
+            # NOTE: Assumes workspace always creates eval_env in the main thread
+            env, (self._action_space, self._observation_space) = self._wrap_env(
+                _make_env(cfg, obs_config), cfg, return_raw_spaces=True
+            )
+            return env
+
+        # Build one env to cache raw spaces used for replay/demo conversion.
+        space_env, (self._action_space, self._observation_space) = self._wrap_env(
             _make_env(cfg, obs_config), cfg, return_raw_spaces=True
         )
-        return env
+        space_env.close()
+
+        return gym.vector.AsyncVectorEnv(
+            [
+                lambda: self._wrap_env(_make_env(cfg, obs_config), cfg)
+                for _ in range(num_eval_envs)
+            ]
+        )
 
     def collect_or_fetch_demos(self, cfg: DictConfig, num_demos: int):
         """See base class for documentation."""
 
-        manager = mp.Manager()
-        mp_list = manager.list()
-        p = mp.Process(
-            target=_get_demo_fn,
-            args=(
+        # When called from a daemon process (e.g. eval_snapshot parallel workers),
+        # Python forbids spawning child processes. Fall back to in-process loading.
+        if mp.current_process().daemon:
+            mp_list = []
+            error_list = []
+            _get_demo_fn(
                 cfg,
                 num_demos,
                 mp_list,
-            ),
-        )
-        p.start()
-        p.join()
+                error_list,
+            )
+            p_exitcode = 0
+        else:
+            manager = mp.Manager()
+            mp_list = manager.list()
+            error_list = manager.list()
+            p = mp.Process(
+                target=_get_demo_fn,
+                args=(
+                    cfg,
+                    num_demos,
+                    mp_list,
+                    error_list,
+                ),
+            )
+            p.start()
+            p.join()
+            p_exitcode = p.exitcode
+
+        if len(error_list) > 0:
+            raise RuntimeError(
+                "Demo collection subprocess failed.\n"
+                f"{error_list[0]}\n"
+                "If this is a Qt/OpenGL headless issue, run with `xvfb-run` and "
+                "avoid setting `QT_QPA_PLATFORM=offscreen`."
+            )
+        if p_exitcode not in (0, None):
+            raise RuntimeError(
+                f"Demo collection subprocess exited with code {p_exitcode}. "
+                "If this is a Qt/OpenGL headless setup, use `xvfb-run` and "
+                "`QT_QPA_PLATFORM_PLUGIN_PATH`, and avoid "
+                "`QT_QPA_PLATFORM=offscreen`."
+            )
 
         self._raw_demos = list(mp_list)
+        if len(self._raw_demos) == 0:
+            dataset_root = cfg.env.dataset_root
+            task_name = cfg.env.task_name
+            task_root = (
+                os.path.join(dataset_root, task_name)
+                if dataset_root is not None
+                else "<live_demos>"
+            )
+            raise ValueError(
+                "No demonstrations were loaded for task "
+                f"'{task_name}' (requested demos={num_demos}). "
+                f"Checked dataset root: '{task_root}'. "
+                "Please verify the dataset exists and contains episode files."
+            )
 
         # Compute action statistics for demo-based rescaling, e.g., standardization
         self._action_stats = self._compute_action_stats(self._raw_demos)
@@ -731,7 +814,9 @@ class RLBenchEnvFactory(EnvFactory):
             self._rescale_demo_action_helper, self._raw_demos, cfg
         )
 
-    def load_demos_into_replay(self, cfg: DictConfig, buffer):
+    def load_demos_into_replay(
+        self, cfg: DictConfig, buffer, is_demo_buffer: bool = False
+    ):
         """See base class for documentation."""
         assert hasattr(self, "_demos"), (
             "There's no _demo attribute inside the factory, "
@@ -786,6 +871,13 @@ class RLBenchEnvFactory(EnvFactory):
                 *_, info = step
                 if "demo_action" in info:
                     actions.append(info["demo_action"])
+        if len(actions) == 0:
+            raise ValueError(
+                "No valid 'demo_action' entries found in loaded demos; "
+                "cannot compute action statistics. "
+                "This usually means demos are missing/corrupted or all actions were "
+                "filtered out as out-of-bounds."
+            )
         actions = np.stack(actions)
 
         # Gripper one-hot action's stats are hard-coded

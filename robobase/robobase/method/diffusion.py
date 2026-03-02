@@ -104,7 +104,7 @@ class Actor(nn.Module):
             self.ema.copy_to(actor.parameters())
 
             # initialize action from Gaussian noise
-            b = 1
+            b = obs_features.shape[0]
             noisy_action = torch.randn(
                 (b, self.sequence_length, self.action_dim), device=obs_features.device
             )
@@ -206,14 +206,19 @@ class Diffusion(BC):
         _, noisy_action = self.actor.infer(low_dim_obs, fused_rgb_feats)
         return noisy_action.detach()
 
-    def update_actor(self, low_dim_obs, fused_view_feats, action, loss_coeff):
+    def update_actor(
+        self, low_dim_obs, fused_view_feats, action, loss_coeff, action_mask=None
+    ):
         metrics = dict()
         noise_pred, noise = self.actor(low_dim_obs, fused_view_feats, action)
-        mse_loss = (
-            F.mse_loss(noise_pred, noise, reduction="none")
-            .mean(-1)
-            .mean(-1, keepdims=True)
-        )
+        # Shape: (B, T). Reduce action dims first, then optionally mask padded steps.
+        step_mse = F.mse_loss(noise_pred, noise, reduction="none").mean(-1)
+        if action_mask is not None:
+            action_mask = action_mask.float()
+            valid_steps = action_mask.sum(-1).clamp_min(1.0)
+            mse_loss = ((step_mse * action_mask).sum(-1) / valid_steps).unsqueeze(-1)
+        else:
+            mse_loss = step_mse.mean(-1, keepdims=True)
         actor_loss = (mse_loss * loss_coeff.unsqueeze(1)).mean()
 
         new_pri = torch.sqrt(mse_loss + 1e-10)

@@ -5,6 +5,16 @@ import numpy as np
 import gymnasium as gym
 
 
+def _find_method_on_env_chain(env, method_name: str):
+    cur = env
+    while cur is not None:
+        method = getattr(cur, method_name, None)
+        if callable(method):
+            return method
+        cur = getattr(cur, "env", None)
+    return None
+
+
 def _render_single_env_if_vector(env: gym.vector.VectorEnv):
     if getattr(env, "is_vector_env", False):
         if getattr(env, "parent_pipes", False):
@@ -38,10 +48,21 @@ class VideoRecorder:
     def init(self, env, enabled=True):
         self.frames = []
         self.enabled = self.save_dir is not None and enabled
+        set_record_sim_frames = _find_method_on_env_chain(env, "set_record_sim_frames")
+        if set_record_sim_frames is not None:
+            set_record_sim_frames(self.enabled)
         self.record(env)
 
     def record(self, env):
         if self.enabled:
+            consume_last_step_frames = _find_method_on_env_chain(
+                env, "consume_last_step_frames"
+            )
+            if consume_last_step_frames is not None:
+                step_frames = consume_last_step_frames()
+                if len(step_frames) > 0:
+                    self.frames.extend(step_frames)
+                    return
             frame = _render_single_env_if_vector(env)
             if frame is not None:
                 self.frames.append(frame)

@@ -129,6 +129,8 @@ class UniformReplayBuffer(ReplayBuffer):
         fetch_every: int = 100,
         sequential: bool = False,
         transition_seq_len: int = 1,
+        tail_noise_n: int = 0,
+        tail_noise_std: float = 0.0,
     ):
         """Initializes OutOfGraphReplayBuffer.
 
@@ -159,6 +161,9 @@ class UniformReplayBuffer(ReplayBuffer):
             sequential format.
           transition_seq_len (int): the length of the transition sequence to sample
             from sequential replay buffer. Only applicable if sequential is true.
+          tail_noise_n (int): if > 0, replace the last N actions of each sampled
+            action chunk with Gaussian noise.
+          tail_noise_std (float): standard deviation for the Gaussian tail noise.
 
         Raises:
           ValueError: If replay_capacity is too small to hold at least one
@@ -226,6 +231,8 @@ class UniformReplayBuffer(ReplayBuffer):
         self._nstep = 1 if sequential else nstep
         self._gamma = gamma
         self._sequential = sequential
+        self._tail_noise_n = int(max(0, tail_noise_n))
+        self._tail_noise_std = float(max(0.0, tail_noise_std))
 
         self.observation_elements = observation_elements
         self.extra_replay_elements = extra_replay_elements
@@ -788,6 +795,13 @@ class UniformReplayBuffer(ReplayBuffer):
             )
         
         replay_sample[ACTION] = action_seq
+        if self._tail_noise_n > 0 and self._tail_noise_std > 0.0:
+            noise_n = min(self._tail_noise_n, replay_sample[ACTION].shape[0])
+            noise_shape = (noise_n, *replay_sample[ACTION].shape[1:])
+            tail_noise = np.random.normal(
+                loc=0.0, scale=self._tail_noise_std, size=noise_shape
+            ).astype(np.float32)
+            replay_sample[ACTION][-noise_n:] = np.clip(tail_noise, -1.0, 1.0)
         replay_sample["mask"] = mask
 
         # Add the rest
