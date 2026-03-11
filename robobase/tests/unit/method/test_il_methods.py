@@ -31,6 +31,10 @@ DIFFUSION_OVERRIDES = COMMON_OVERRIDES + [
     "method.num_diffusion_iters=2",
     "action_sequence=20",
 ]
+FLOW_MATCHING_OVERRIDES = COMMON_OVERRIDES + [
+    "method.num_inference_steps=2",
+    "action_sequence=20",
+]
 
 
 @pytest.mark.parametrize(
@@ -38,6 +42,7 @@ DIFFUSION_OVERRIDES = COMMON_OVERRIDES + [
     [
         ("bc", DEFAULT_OVERRIDES),
         ("diffusion", DIFFUSION_OVERRIDES),
+        ("flow_matching", FLOW_MATCHING_OVERRIDES),
         ("act", DEFAULT_OVERRIDES),
     ],
 )
@@ -135,3 +140,11 @@ class TestILMethods(Base):
             "demos=1",
         ]
         super().test_save_load_snapshot(method, new_params)
+
+    def test_load_snapshot_preserves_runtime_cfg(self, method, cfg_params):
+        new_params = cfg_params + [
+            "env=rlbench/reach_target",
+            "env.action_mode=JOINT_POSITION",
+            "demos=1",
+        ]
+        super().test_load_snapshot_preserves_runtime_cfg(method, new_params)

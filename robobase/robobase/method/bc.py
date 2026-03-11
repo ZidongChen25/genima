@@ -135,7 +135,7 @@ class BC(Method):
         self.actor_model = self.actor_model(
             input_shapes=self.get_fully_connected_inputs(),
             output_shape=self.action_space.shape[-1],
-            num_envs=self.num_train_envs + 1,  # +1 for eval
+            num_envs=self.num_train_envs + self.num_eval_envs,
         )
         self.actor = Actor(self.action_space, self.actor_model).to(self.device)
         self.actor_opt = (self.actor.preferred_optimiser)(lr=self.lr)

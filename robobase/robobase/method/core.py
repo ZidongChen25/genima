@@ -23,6 +23,7 @@ class Method(nn.Module, ABC):
         action_space: spaces.Box,
         device: torch.device,
         num_train_envs: int,
+        num_eval_envs: int,
         replay_alpha: float,
         replay_beta: float,
         frame_stack_on_channel: bool,
@@ -34,10 +35,10 @@ class Method(nn.Module, ABC):
         self.action_space = action_space
         self.device = device
         self.num_train_envs = num_train_envs
+        self.num_eval_envs = num_eval_envs
         self.replay_alpha = replay_alpha
         self.replay_beta = replay_beta
         self.frame_stack_on_channel = frame_stack_on_channel
-        self.num_eval_envs = 1  # Fixed to 1 for now
         self.intrinsic_reward_module = intrinsic_reward_module
         self._eval_env_running = False
         self.logging = False

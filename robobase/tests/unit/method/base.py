@@ -105,3 +105,39 @@ class Base:
             p.start()
             p.join()
             assert not p.exitcode
+
+    def test_load_snapshot_preserves_runtime_cfg(self, method, cfg_params):
+        GlobalHydra.instance().clear()
+        initialize(config_path="../../../robobase/cfgs")
+        method = ["method=" + method]
+        base_overrides = (
+            method
+            + [
+                "pixels=true",
+                "env=dmc/acrobot_swingup",
+                "save_snapshot=true",
+                "snapshot_every_n=1",
+            ]
+            + cfg_params
+        )
+        cfg = compose(config_name="robobase_config", overrides=base_overrides)
+        resume_cfg = compose(
+            config_name="robobase_config",
+            overrides=base_overrides + ["num_pretrain_steps=4"],
+        )
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            p = multiprocessing.Process(
+                target=_train_process_helper, args=(cfg, tempdir)
+            )
+            p.start()
+            p.join()
+            assert not p.exitcode
+
+            resumed_workspace = Workspace(resume_cfg, work_dir=tempdir)
+            try:
+                resumed_workspace.load_snapshot(preserve_runtime_cfg=True)
+                assert resumed_workspace.pretrain_steps == 2
+                assert resumed_workspace.cfg.num_pretrain_steps == 4
+            finally:
+                resumed_workspace.shutdown()
