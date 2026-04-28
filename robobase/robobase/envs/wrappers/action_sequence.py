@@ -14,8 +14,9 @@ class ActionSequence(gym.ActionWrapper, gym.utils.RecordConstructorArgs):
         gym.utils.RecordConstructorArgs.__init__(self)
         gym.ActionWrapper.__init__(self, env)
         self._sequence_length = sequence_length
-        self.is_vector_env = getattr(env, "is_vector_env", False)
-        self.is_demo_env = getattr(env, "is_demo_env", False)
+        base_env = getattr(env, "unwrapped", env)
+        self.is_vector_env = getattr(base_env, "is_vector_env", False)
+        self.is_demo_env = getattr(base_env, "is_demo_env", False)
         if self.is_vector_env:
             raise NotImplementedError(
                 "It is not possible to use this wrapper with a VecEnv."
